@@ -15,3 +15,6 @@ rustls-pemfile = "1"
 sysproxy = "0.3"
 tokio = { version = "1", features = ["full"] }
 vc-ltl = "5"
+
+[build-dependencies]
+embed-manifest = "1"

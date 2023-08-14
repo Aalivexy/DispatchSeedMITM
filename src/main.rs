@@ -87,7 +87,7 @@ fn main() {
         log_rx: vec![],
     }));
 
-    let mut win = Window::new(&ui.clone(), "MITM Proxy", 300, 400, WindowType::NoMenubar);
+    let mut win = Window::new(&ui.clone(), "MITM Proxy", 400, 600, WindowType::NoMenubar);
     win.on_closing(&ui, move |win| {
         proxy_backup
             .set_system_proxy()
