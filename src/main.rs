@@ -88,6 +88,15 @@ fn main() {
     }));
 
     let mut win = Window::new(&ui.clone(), "MITM Proxy", 400, 600, WindowType::NoMenubar);
+    let proxy_backup_for_ctrlc = proxy_backup.clone();
+    ctrlc::set_handler(move || {
+        proxy_backup_for_ctrlc
+            .set_system_proxy()
+            .context("Failed to set system proxy")
+            .unwrap();
+        std::process::exit(0);
+    })
+    .expect("Failed to set Ctrl-C handler");
     win.on_closing(&ui, move |win| {
         proxy_backup
             .set_system_proxy()
@@ -362,13 +371,16 @@ fn start_proxy(
 
     let ca_cert = rustls::Certificate(
         pemfile::certs(&mut ca_cert_bytes)
-            .context("Failed to parse CA certificate")?
-            .remove(0),
+            .next()
+            .context("Failed to parse CA certificate")??
+            .to_vec(),
     );
     let private_key = rustls::PrivateKey(
         pemfile::pkcs8_private_keys(&mut private_key_bytes)
-            .context("Failed to parse private key")?
-            .remove(0),
+            .next()
+            .context("Failed to parse private key")??
+            .secret_pkcs8_der()
+            .to_vec(),
     );
 
     let ca = RcgenAuthority::new(private_key, ca_cert, 1_000)
