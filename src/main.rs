@@ -1,11 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use anyhow::{Context, Result};
 use hudsucker::{
-    certificate_authority::RcgenAuthority,
-    hyper::{Body, Request},
-    *,
+    certificate_authority::RcgenAuthority, hyper::Request, rustls::crypto::aws_lc_rs, *,
 };
-use rustls_pemfile as pemfile;
+use rcgen::{CertificateParams, KeyPair};
 use std::{
     cell::RefCell,
     net::{SocketAddr, ToSocketAddrs},
@@ -26,7 +24,6 @@ const KEY_PATH: &str = "private.key";
 #[derive(Clone)]
 struct Handler(Arc<Mutex<Sender<String>>>);
 
-#[async_trait::async_trait]
 impl HttpHandler for Handler {
     async fn handle_request(
         &mut self,
@@ -309,10 +306,7 @@ fn main() {
 }
 
 fn gen_ca(win: &Window) -> Result<()> {
-    use rcgen::{
-        BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa,
-        KeyUsagePurpose,
-    };
+    use rcgen::{generate_simple_self_signed, CertifiedKey};
 
     let path = std::env::current_dir()?;
     let cert_path = path.join(CERT_PATH);
@@ -322,25 +316,11 @@ fn gen_ca(win: &Window) -> Result<()> {
         return Ok(());
     }
 
-    let mut params = CertificateParams::default();
-    let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(DnType::CommonName, "MITM");
-    distinguished_name.push(DnType::OrganizationName, "MITM");
-    distinguished_name.push(DnType::CountryName, "CN");
-    distinguished_name.push(DnType::LocalityName, "CN");
-    params.distinguished_name = distinguished_name;
-    params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let ca = Certificate::from_params(params).unwrap();
+    let CertifiedKey { cert, key_pair } =
+        generate_simple_self_signed(&["MITM".to_string()]).unwrap();
 
-    std::fs::write(cert_path, ca.serialize_pem().unwrap())
-        .context("Failed to write certificate")?;
-    std::fs::write(key_path, ca.serialize_private_key_pem())
-        .context("Failed to write private key")?;
+    std::fs::write(cert_path, cert.pem()).context("Failed to write certificate")?;
+    std::fs::write(key_path, key_pair.serialize_pem()).context("Failed to write private key")?;
     Ok(())
 }
 
@@ -366,32 +346,28 @@ fn start_proxy(
     async fn sg(mut rx: tokio::sync::mpsc::Receiver<()>) {
         rx.recv().await.unwrap();
     }
-    let mut ca_cert_bytes: &[u8] = &std::fs::read(cert_path).unwrap();
-    let mut private_key_bytes: &[u8] = &std::fs::read(key_path).unwrap();
+    let mut ca_cert_bytes = &std::fs::read_to_string(cert_path).unwrap();
+    let mut private_key_bytes = &std::fs::read_to_string(key_path).unwrap();
 
-    let ca_cert = rustls::Certificate(
-        pemfile::certs(&mut ca_cert_bytes)
-            .next()
-            .context("Failed to parse CA certificate")??
-            .to_vec(),
-    );
-    let private_key = rustls::PrivateKey(
-        pemfile::pkcs8_private_keys(&mut private_key_bytes)
-            .next()
-            .context("Failed to parse private key")??
-            .secret_pkcs8_der()
-            .to_vec(),
-    );
+    let key_pair = KeyPair::from_pem(&mut private_key_bytes).unwrap();
+    let ca_cert = CertificateParams::from_ca_cert_pem(&mut ca_cert_bytes)
+        .context("Failed to parse CA certificate")?
+        .self_signed(&key_pair)
+        .context("Failed to sign CA certificate")?;
 
-    let ca = RcgenAuthority::new(private_key, ca_cert, 1_000)
-        .context("Failed to create Certificate Authority")?;
+    let ca = RcgenAuthority::new(key_pair, ca_cert, 1_000, aws_lc_rs::default_provider());
 
     let proxy = Proxy::builder()
         .with_addr(socket_addr)
-        .with_rustls_client()
         .with_ca(ca)
+        .with_rustls_client(aws_lc_rs::default_provider())
         .with_http_handler(Handler(Arc::new(Mutex::new(log_tx))))
-        .build();
+        .with_graceful_shutdown(async {
+            sg(rx).await;
+            println!("Shutting down proxy...");
+        })
+        .build()
+        .context("Failed to build proxy")?;
 
     sysproxy::Sysproxy {
         enable: true,
@@ -407,7 +383,7 @@ fn start_proxy(
         .enable_all()
         .build()?
         .block_on(async {
-            if let Err(e) = proxy.start(sg(rx)).await {
+            if let Err(e) = proxy.start().await {
                 println!("{}", e);
             }
         });

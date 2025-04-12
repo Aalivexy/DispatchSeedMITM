@@ -7,9 +7,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-ctrlc = "3.4"
+ctrlc = "3"
 hudsucker = "0.23"
-libui = "0.3"
+libui = "0.4"
 rcgen = "0.13"
 runas = "1"
 rustls-pemfile = "2"
